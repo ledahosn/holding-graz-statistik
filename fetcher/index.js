@@ -7,8 +7,8 @@ console.log('Fetcher service starting...');
 
 // --- CONFIGURATION ---
 const DEBUG = true;
-const FETCH_INTERVAL = 30 * 1000;
-const JAKOMINIPLATZ_ID = '460304700';
+const FETCH_INTERVAL = 45 * 1000; // Increased interval slightly
+const STATIONS_PER_CYCLE = 5; // How many stations to query each cycle
 const ONLY_FETCH_GRAZ_LINES = true;
 
 const GRAZ_BOUNDING_BOX = {
@@ -17,6 +17,11 @@ const GRAZ_BOUNDING_BOX = {
     south: 46.95,
     east: 15.60,
 };
+
+// --- STATE ---
+let allGrazStops = [];
+let currentStopIndex = 0;
+
 
 // --- DATABASE SETUP ---
 const pool = new Pool({
@@ -32,7 +37,7 @@ const dbQuery = async (query, values) => {
 };
 
 // --- HAFAS CLIENT SETUP ---
-const userAgent = 'GrazRealtimeTransportMonitor/1.0 (https://your.domain.or/repo)';
+const userAgent = 'GrazRealtimeTransportMonitor/1.0 (https://github.com/ledahosn/holding-graz-statistik)';
 const hafas = createClient(stvProfile, userAgent);
 
 // --- FILTERING LOGIC ---
@@ -40,6 +45,7 @@ function isGrazLine(line) {
     if (!ONLY_FETCH_GRAZ_LINES) return true;
     if (!line || !line.name || !line.product) return false;
     const lineIdentifier = line.name.split(' ').pop();
+    // Regex for tram lines (1-2 digits) and city bus lines (2 digits, possibly with E or A suffix)
     const isTram = line.product === 'tram' && /^\d{1,2}$/.test(lineIdentifier);
     const isBus = line.product === 'city-bus' && /^\d{2}E?A?$/.test(lineIdentifier);
     return isTram || isBus;
@@ -72,6 +78,7 @@ async function upsertStopEvent(event) {
     if (existingEvent) {
         const existingEventTime = existingEvent.actual_time ? new Date(existingEvent.actual_time) : (existingEvent.planned_time ? new Date(existingEvent.planned_time) : null);
 
+        // Skip updates for events that have already passed to avoid race conditions
         if (existingEventTime && existingEventTime < now) {
             if (DEBUG) console.log(`  -> [DB] Skipping update for past event: Trip ${trip_id}, Stop ${stop_id}, Type ${event_type}`);
             return;
@@ -112,23 +119,28 @@ async function fetchTripDetails(tripId, processedStops) {
         const { trip } = await hafas.trip(tripId, { stopovers: true });
         if (!trip || !trip.line || !isGrazLine(trip.line)) return;
 
+        // Upsert Line and Trip info
         await dbQuery('INSERT INTO lines (line_id, line_name, product) VALUES ($1, $2, $3) ON CONFLICT (line_id) DO NOTHING', [trip.line.id, trip.line.name, trip.line.product]);
         const date = new Date(trip.departure || trip.plannedDeparture).toISOString().split('T')[0];
         await dbQuery('INSERT INTO trips (trip_id, line_id, direction, date) VALUES ($1, $2, $3, $4) ON CONFLICT (trip_id) DO NOTHING', [trip.id, trip.line.id, trip.direction, date]);
 
+        // Insert current vehicle position
         if (trip.currentLocation) {
             await dbQuery('INSERT INTO vehicle_positions (trip_id, "timestamp", location, delay_seconds) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326), $5) ON CONFLICT (trip_id, "timestamp") DO NOTHING', [trip.id, new Date().toISOString(), trip.currentLocation.longitude, trip.currentLocation.latitude, trip.departureDelay || 0]);
         }
 
+        // Process all stopovers in the trip
         for (const [index, stopover] of trip.stopovers.entries()) {
             const { stop } = stopover;
             if (!stop || !stop.id) continue;
 
+            // Add stop to DB if it's new and within Graz
             if (!processedStops.has(stop.id) && isWithinBoundingBox(stop.location)) {
                 processedStops.add(stop.id);
                 await dbQuery('INSERT INTO stops (stop_id, stop_name, location) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326)) ON CONFLICT (stop_id) DO NOTHING', [stop.id, stop.name, stop.location.longitude, stop.location.latitude]);
             }
 
+            // Upsert arrival event
             if(stopover.arrival || stopover.plannedArrival) {
                 await upsertStopEvent({
                     trip_id: trip.id,
@@ -142,6 +154,7 @@ async function fetchTripDetails(tripId, processedStops) {
                 });
             }
 
+            // Upsert departure event
             if(stopover.departure || stopover.plannedDeparture) {
                 await upsertStopEvent({
                     trip_id: trip.id,
@@ -156,27 +169,71 @@ async function fetchTripDetails(tripId, processedStops) {
             }
         }
     } catch (error) {
+        // HAFAS can sometimes throw errors for specific trips, we'll log and continue
         console.error(`Error fetching trip ${tripId}:`, error.message);
     }
 }
 
+/**
+ * Fetches all transit stops within the defined bounding box.
+ */
+async function fetchAllGrazStops() {
+    console.log('[INIT] Fetching all stops in the Graz area...');
+    try {
+        const locations = await hafas.locations({
+            type: 'stop',
+            box: GRAZ_BOUNDING_BOX
+        });
+        allGrazStops = locations.filter(loc => loc.id && loc.name);
+        console.log(`[INIT] Found ${allGrazStops.length} stops.`);
+        if (allGrazStops.length === 0) {
+            console.error("[INIT] No stops found. Check HAFAS connection or bounding box. Retrying in 1 minute.");
+            setTimeout(fetchAllGrazStops, 60000);
+        }
+    } catch (error) {
+        console.error('[INIT] Failed to fetch stops:', error.message);
+        console.error("[INIT] Retrying in 1 minute.");
+        setTimeout(fetchAllGrazStops, 60000);
+    }
+}
 
 async function mainLoop() {
+    if (allGrazStops.length === 0) {
+        console.log("Stop list is empty, waiting for initial fetch...");
+        return;
+    }
     console.log('\n--- Starting new fetch cycle ---');
     const processedTripIds = new Set();
     const processedStops = new Set();
-    try {
-        const { departures } = await hafas.departures(JAKOMINIPLATZ_ID, { duration: 120 });
-        if (!departures) return;
 
-        for (const departure of departures) {
-            if (departure.tripId && isGrazLine(departure.line) && !processedTripIds.has(departure.tripId)) {
-                processedTripIds.add(departure.tripId);
+    // Determine the slice of stops to process in this cycle
+    const stopsToQuery = [];
+    for (let i = 0; i < STATIONS_PER_CYCLE; i++) {
+        const index = (currentStopIndex + i) % allGrazStops.length;
+        stopsToQuery.push(allGrazStops[index]);
+    }
+    currentStopIndex = (currentStopIndex + STATIONS_PER_CYCLE) % allGrazStops.length;
+
+    console.log(`Querying departures for ${stopsToQuery.length} stops (Index ${currentStopIndex}/${allGrazStops.length})...`);
+
+    try {
+        // Fetch departures for each stop in this cycle's slice
+        const departurePromises = stopsToQuery.map(stop => hafas.departures(stop.id, { duration: 90 }));
+        const results = await Promise.allSettled(departurePromises);
+
+        for (const result of results) {
+            if (result.status === 'fulfilled' && result.value && result.value.departures) {
+                for (const departure of result.value.departures) {
+                    if (departure.tripId && isGrazLine(departure.line) && !processedTripIds.has(departure.tripId)) {
+                        processedTripIds.add(departure.tripId);
+                    }
+                }
             }
         }
 
-        console.log(`Found ${processedTripIds.size} unique trips to process.`);
+        console.log(`Found ${processedTripIds.size} unique trips to process in this cycle.`);
 
+        // Process each unique trip found
         for (const tripId of processedTripIds) {
             await fetchTripDetails(tripId, processedStops);
         }
@@ -193,8 +250,13 @@ pool.connect()
     .then(async (client) => {
         console.log('Successfully connected to the database.');
         client.release();
-        mainLoop();
-        setInterval(mainLoop, FETCH_INTERVAL);
+        // First, get the list of all stops
+        await fetchAllGrazStops();
+        // Then, start the main loop interval
+        if (allGrazStops.length > 0) {
+            mainLoop(); // Run once immediately
+            setInterval(mainLoop, FETCH_INTERVAL);
+        }
     })
     .catch(err => {
         console.error('Failed to connect to the database:', err.message);
