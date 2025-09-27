@@ -1,0 +1,13 @@
+# docker-compose.prod.yml
+services:
+  web:
+    build:
+      target: build # This should be the final nginx stage
+    ports:
+      - "80:80"
+
+  fetcher:
+    command: node index.js
+
+  api:
+    command: node index.js

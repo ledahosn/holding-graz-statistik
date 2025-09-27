@@ -1,0 +1,21 @@
+services:
+  fetcher:
+    volumes:
+      - ./fetcher:/usr/src/app
+      - /usr/src/app/node_modules
+
+  api:
+    volumes:
+      - ./api:/usr/src/app
+      - /usr/src/app/node_modules
+
+  web:
+    build:
+      target: build # Use the build stage for the dev server
+    ports:
+      - "80:80"
+      - "5173:5173"
+    volumes:
+      - ./web:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run dev

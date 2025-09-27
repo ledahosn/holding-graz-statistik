@@ -1,20 +1,24 @@
-# Use an official Node.js runtime as a parent image
-FROM node:18-slim
+# api/Dockerfile
 
-# Set the working directory in the container
+# ---- Base Stage ----
+FROM node:18-slim AS base
 WORKDIR /usr/src/app
-
-# Copy package.json and package-lock.json
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# ---- Dependencies Stage ----
+FROM base AS dependencies
+RUN npm install --production
 
-# Copy the rest of the application's source code
+# ---- Build Stage ----
+FROM base AS build
 COPY . .
+RUN npm install
+# If you had a build step, you would run it here
 
-# Expose the port the app runs on
+# ---- Production Stage ----
+FROM node:18-slim AS production
+WORKDIR /usr/src/app
+COPY --from=dependencies /usr/src/app/node_modules ./node_modules
+COPY --from=build /usr/src/app .
 EXPOSE 3001
-
-# Command to run the application
 CMD ["node", "index.js"]
