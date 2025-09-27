@@ -92,7 +92,7 @@ const tripDelays = ref([]);
 const isLoading = ref(false);
 const error = ref(null);
 
-const API_BASE_URL = 'http://localhost:3001/api';
+const API_BASE_URL = '/api';
 
 async function fetchLines() {
   try {
