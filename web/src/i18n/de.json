@@ -1,0 +1,19 @@
+{
+  "liveMap": "Live-Karte",
+  "statistics": "Statistiken",
+  "linePerformanceStats": "Linienleistungsstatistik",
+  "selectLine": "Linie auswählen",
+  "pleaseChoose": "Bitte eine Linie auswählen",
+  "date": "Datum",
+  "getTrips": "Fahrten abrufen",
+  "loading": "Wird geladen...",
+  "tripsFor": "Fahrten für {lineName} am {date}",
+  "direction": "Richtung",
+  "noTripsFound": "Keine Fahrten für die ausgewählten Kriterien gefunden.",
+  "loadingTripDetails": "Lade Fahrtdetails",
+  "delayDetailsForTrip": "Verspätungsdetails für Fahrt {tripId}",
+  "stopName": "Haltestelle",
+  "plannedArrival": "Geplant",
+  "actualArrival": "Tatsächlich",
+  "delay": "Verspätung"
+}

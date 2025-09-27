@@ -6,7 +6,7 @@ const { Pool } = pkg;
 console.log('Fetcher service starting...');
 
 // --- CONFIGURATION ---
-const DEBUG = true; // Set to true for verbose logging
+const DEBUG = true;
 const FETCH_INTERVAL = 30 * 1000;
 const JAKOMINIPLATZ_ID = '460304700';
 const ONLY_FETCH_GRAZ_LINES = true;
@@ -23,48 +23,28 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
 });
 
-const upsert = async (query, values) => {
+const dbQuery = async (query, values) => {
     try {
-        await pool.query(query, values);
+        return await pool.query(query, values);
     } catch (err) {
         console.error(`Database Error on query: ${query.substring(0, 100)}...`, err.message);
     }
 };
 
 // --- HAFAS CLIENT SETUP ---
-const userAgent = 'GrazRealtimeTransportMonitor/1.0 (https://github.com/your-repo)';
+const userAgent = 'GrazRealtimeTransportMonitor/1.0 (https://your.domain.or/repo)';
 const hafas = createClient(stvProfile, userAgent);
 
-
-// --- CORRECTED FILTERING LOGIC ---
-
-/**
- * Checks if a line is a local Graz tram or bus based on its product and name.
- * @param {object} line - The line object from a HAFAS response.
- * @returns {boolean} - True if it's a valid Graz line.
- */
+// --- FILTERING LOGIC ---
 function isGrazLine(line) {
     if (!ONLY_FETCH_GRAZ_LINES) return true;
     if (!line || !line.name || !line.product) return false;
-
-    // Extract the numeric part of the line name (e.g., "Straßenbahn 1" -> "1", "Stadtbus 34E" -> "34E")
     const lineIdentifier = line.name.split(' ').pop();
-
     const isTram = line.product === 'tram' && /^\d{1,2}$/.test(lineIdentifier);
     const isBus = line.product === 'city-bus' && /^\d{2}E?A?$/.test(lineIdentifier);
-
-    if (DEBUG) {
-        console.log(`[FILTER] Line: '${line.name}' (${line.product}) -> Identifier: '${lineIdentifier}'. Tram? ${isTram}. Bus? ${isBus}. -> Allowed: ${isTram || isBus}`);
-    }
-
     return isTram || isBus;
 }
 
-/**
- * Checks if a location is within the defined geographic bounding box.
- * @param {object} location - The location object from a HAFAS response.
- * @returns {boolean} - True if the location is within the box.
- */
 function isWithinBoundingBox(location) {
     if (!location || !location.latitude || !location.longitude) return false;
     return (
@@ -75,10 +55,63 @@ function isWithinBoundingBox(location) {
     );
 }
 
-
-// --- CORE LOGIC (No changes needed below this line) ---
+// --- CORE LOGIC ---
 const processedTripIds = new Set();
 const processedStopIds = new Set();
+
+// REVISED: Manual upsert logic to work with TimescaleDB constraints
+async function upsertStopEvent(event) {
+    const { trip_id, stop_id, event_type, stop_sequence, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds } = event;
+    const now = new Date();
+    const eventTime = actual_time ? new Date(actual_time) : (planned_time ? new Date(planned_time) : now);
+
+    // First, check if the event already exists.
+    const selectQuery = `
+        SELECT actual_time, planned_time FROM stop_events
+        WHERE trip_id = $1 AND stop_id = $2 AND event_type = $3;
+    `;
+    const result = await dbQuery(selectQuery, [trip_id, stop_id, event_type]);
+    const existingEvent = result && result.rows.length > 0 ? result.rows[0] : null;
+
+    if (existingEvent) {
+        // Row exists. Check if it's already in the past.
+        const existingEventTime = existingEvent.actual_time ? new Date(existingEvent.actual_time) : (existingEvent.planned_time ? new Date(existingEvent.planned_time) : null);
+
+        if (existingEventTime && existingEventTime < now) {
+            if (DEBUG) console.log(`  -> [DB] Skipping update for past event: Trip ${trip_id}, Stop ${stop_id}, Type ${event_type}`);
+            return; // It's in the past, so we don't touch it.
+        }
+
+        // It's a future event, so we update it with the latest data.
+        if (DEBUG) console.log(`  -> [DB] Updating future event: Trip ${trip_id}, Stop ${stop_id}, Type ${event_type}`);
+        const updateQuery = `
+            UPDATE stop_events
+            SET
+                "timestamp" = $1,
+                actual_time = $2,
+                arrival_delay_seconds = $3,
+                departure_delay_seconds = $4,
+                planned_time = $5,
+                stop_sequence = $6
+            WHERE trip_id = $7 AND stop_id = $8 AND event_type = $9;
+        `;
+        await dbQuery(updateQuery, [
+            eventTime, actual_time, arrival_delay_seconds, departure_delay_seconds, planned_time, stop_sequence,
+            trip_id, stop_id, event_type
+        ]);
+    } else {
+        // Row does not exist, so we insert it.
+        if (DEBUG) console.log(`  -> [DB] Inserting new event: Trip ${trip_id}, Stop ${stop_id}, Type ${event_type}`);
+        const insertQuery = `
+            INSERT INTO stop_events (timestamp, trip_id, stop_id, stop_sequence, event_type, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+        `;
+        await dbQuery(insertQuery, [
+            eventTime, trip_id, stop_id, stop_sequence, event_type, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds
+        ]);
+    }
+}
+
 
 async function fetchTripDetails(tripId) {
     if (processedTripIds.has(tripId)) return;
@@ -87,25 +120,52 @@ async function fetchTripDetails(tripId) {
     try {
         if (DEBUG) console.log(`[TRIP] Fetching details for tripId: ${tripId}`);
         const { trip } = await hafas.trip(tripId, { stopovers: true });
-        if (!trip || !trip.line) return;
+        if (!trip || !trip.line || !isGrazLine(trip.line)) return;
 
-        if (!isGrazLine(trip.line)) return;
-
-        // DB operations...
-        await upsert('INSERT INTO lines (line_id, line_name, product) VALUES ($1, $2, $3) ON CONFLICT (line_id) DO NOTHING', [trip.line.id, trip.line.name, trip.line.product]);
+        // Static data upserts (these are fine as they are)
+        await dbQuery('INSERT INTO lines (line_id, line_name, product) VALUES ($1, $2, $3) ON CONFLICT (line_id) DO NOTHING', [trip.line.id, trip.line.name, trip.line.product]);
         const date = new Date(trip.departure || trip.plannedDeparture).toISOString().split('T')[0];
-        await upsert('INSERT INTO trips (trip_id, line_id, direction, date) VALUES ($1, $2, $3, $4) ON CONFLICT (trip_id) DO NOTHING', [trip.id, trip.line.id, trip.direction, date]);
+        await dbQuery('INSERT INTO trips (trip_id, line_id, direction, date) VALUES ($1, $2, $3, $4) ON CONFLICT (trip_id) DO NOTHING', [trip.id, trip.line.id, trip.direction, date]);
 
         if (trip.currentLocation) {
-            if (DEBUG) console.log(`  -> [DB] Saving Position: Line ${trip.line.name}, Trip ${trip.id}`);
-            await upsert('INSERT INTO vehicle_positions (trip_id, "timestamp", location, delay_seconds) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326), $5) ON CONFLICT (trip_id, "timestamp") DO NOTHING', [trip.id, new Date().toISOString(), trip.currentLocation.longitude, trip.currentLocation.latitude, trip.departureDelay || 0]);
+            await dbQuery('INSERT INTO vehicle_positions (trip_id, "timestamp", location, delay_seconds) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326), $5) ON CONFLICT (trip_id, "timestamp") DO NOTHING', [trip.id, new Date().toISOString(), trip.currentLocation.longitude, trip.currentLocation.latitude, trip.departureDelay || 0]);
         }
 
-        for (const stopover of trip.stopovers) {
+        for (const [index, stopover] of trip.stopovers.entries()) {
             const { stop } = stopover;
-            if (stop && stop.id && !processedStopIds.has(stop.id) && isWithinBoundingBox(stop.location)) {
+            if (!stop || !stop.id) continue;
+
+            if (!processedStopIds.has(stop.id) && isWithinBoundingBox(stop.location)) {
                 processedStopIds.add(stop.id);
                 fetchDeparturesForStop(stop.id);
+            }
+
+            // Use the new upsert function for arrival
+            if(stopover.arrival || stopover.plannedArrival) {
+                await upsertStopEvent({
+                    trip_id: trip.id,
+                    stop_id: stop.id,
+                    stop_sequence: index + 1,
+                    event_type: 'arrival',
+                    planned_time: stopover.plannedArrival,
+                    actual_time: stopover.arrival,
+                    arrival_delay_seconds: stopover.arrivalDelay,
+                    departure_delay_seconds: null
+                });
+            }
+
+            // Use the new upsert function for departure
+            if(stopover.departure || stopover.plannedDeparture) {
+                await upsertStopEvent({
+                    trip_id: trip.id,
+                    stop_id: stop.id,
+                    stop_sequence: index + 1,
+                    event_type: 'departure',
+                    planned_time: stopover.plannedDeparture,
+                    actual_time: stopover.departure,
+                    arrival_delay_seconds: null,
+                    departure_delay_seconds: stopover.departureDelay
+                });
             }
         }
     } catch (error) {
@@ -118,21 +178,13 @@ async function fetchDeparturesForStop(stopId) {
     if (DEBUG) console.log(`[DEPARTURES] Fetching departures for stop ID: ${stopId}`);
     try {
         const { departures } = await hafas.departures(stopId, { duration: 60 });
-
-        if (DEBUG) {
-            console.log(`[DEPARTURES] Found ${departures.length} raw departures for stop ${stopId}. Now filtering...`);
-        }
-
-        if (departures.length === 0) return;
+        if (!departures || departures.length === 0) return;
 
         for (const departure of departures) {
             if (departure.line && isGrazLine(departure.line)) {
-                if (DEBUG) console.log(`  -> [PASS] Departure for line '${departure.line.name}' passed filter. Processing trip ${departure.tripId}.`);
-
                 if (departure.stop) {
-                    await upsert('INSERT INTO stops (stop_id, stop_name, location) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326)) ON CONFLICT (stop_id) DO NOTHING', [departure.stop.id, departure.stop.name, departure.stop.location.longitude, departure.stop.location.latitude]);
+                    await dbQuery('INSERT INTO stops (stop_id, stop_name, location) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326)) ON CONFLICT (stop_id) DO NOTHING', [departure.stop.id, departure.stop.name, departure.stop.location.longitude, departure.stop.location.latitude]);
                 }
-
                 if (departure.tripId) {
                     fetchTripDetails(departure.tripId);
                 }
@@ -143,27 +195,13 @@ async function fetchDeparturesForStop(stopId) {
     }
 }
 
-async function getAndLogStationInfo(stationId) {
-    try {
-        const stop = await hafas.stop(stationId, { linesOfStops: true });
-        console.log('[DEBUG] Initial station info for Jakominiplatz:');
-        console.log(JSON.stringify(stop, null, 2));
-    } catch (error) {
-        console.error(`[DEBUG] Could not fetch info for station ${stationId}:`, error.message);
-    }
-}
-
 // --- MAIN LOOP ---
 async function mainLoop() {
     console.log('\n--- Starting new fetch cycle ---');
-    if (DEBUG) console.log(`[CONFIG] Debug mode is ON. Fetching only Graz lines: ${ONLY_FETCH_GRAZ_LINES}.`);
-
     processedTripIds.clear();
     processedStopIds.clear();
-
     processedStopIds.add(JAKOMINIPLATZ_ID);
     await fetchDeparturesForStop(JAKOMINIPLATZ_ID);
-
     console.log('--- Fetch cycle complete. Waiting for next interval. ---');
 }
 
@@ -172,9 +210,6 @@ pool.connect()
     .then(async (client) => {
         console.log('Successfully connected to the database.');
         client.release();
-        if (DEBUG) {
-            await getAndLogStationInfo(JAKOMINIPLATZ_ID);
-        }
         mainLoop();
         setInterval(mainLoop, FETCH_INTERVAL);
     })

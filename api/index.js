@@ -1,6 +1,6 @@
 import express from 'express';
 import http from 'http';
-import cors from 'cors'; // Import the cors package
+import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import pkg from 'pg';
 const { Pool } = pkg;
@@ -18,19 +18,20 @@ const server = http.createServer(app);
 const PORT = 3001;
 
 // --- CORS Configuration ---
-// This tells the server to accept requests from your Vite dev server
 const corsOptions = {
     origin: 'http://localhost:5173'
 };
 app.use(cors(corsOptions));
+// Add JSON body parser middleware for POST requests
+app.use(express.json());
 
 
-// A test endpoint to see if the server is running
+// --- API ENDPOINTS ---
+
 app.get('/api', (req, res) => {
     res.json({ message: 'Hello from the Graz Transport API!' });
 });
 
-// The rest of your file remains the same...
 app.get('/api/lines', async (req, res) => {
     try {
         const { rows } = await pool.query('SELECT * FROM lines ORDER BY line_name');
@@ -41,51 +42,70 @@ app.get('/api/lines', async (req, res) => {
     }
 });
 
-// ... (the rest of the file is unchanged)
-// Endpoint for statistics, as described in the blueprint
-app.get('/api/stats/line/:lineId', async (req, res) => {
+app.get('/api/trips/line/:lineId', async (req, res) => {
     const { lineId } = req.params;
-    // Extract and validate query parameters
-    const date = req.query.date || new Date().toISOString().split('T')[0];
-    const startTime = req.query.startTime || '00:00:00';
-    const endTime = req.query.endTime || '23:59:59';
-    const interval = req.query.interval || '15 minutes';
+    const { date } = req.query;
+
+    if (!date) {
+        return res.status(400).json({ error: 'A date query parameter is required.' });
+    }
 
     try {
-        // This query uses the time_bucket() function from TimescaleDB
         const query = `
-            SELECT
-                time_bucket($1, "timestamp") AS interval_start,
-                AVG(delay_seconds) AS avg_delay_seconds,
-                COUNT(*) AS event_count
-            FROM vehicle_positions
-            WHERE trip_id IN (
-                SELECT trip_id FROM trips WHERE line_id = $2 AND "date" = $3
-            )
-              AND "timestamp" BETWEEN $4 AND $5
-            GROUP BY interval_start
-            ORDER BY interval_start;
+            SELECT trip_id, direction
+            FROM trips
+            WHERE line_id = $1 AND date = $2
+            ORDER BY direction;
         `;
-        const startDateTime = `${date}T${startTime}Z`;
-        const endDateTime = `${date}T${endTime}Z`;
-        const values = [interval, lineId, date, startDateTime, endDateTime];
-
-        const { rows } = await pool.query(query, values);
+        const { rows } = await pool.query(query, [lineId, date]);
         res.json(rows);
     } catch (err) {
-        console.error(`Error fetching stats for line ${lineId}:`, err);
+        console.error(`Error fetching trips for line ${lineId} on ${date}:`, err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// MODIFIED: Changed from GET to POST to handle complex trip_id
+app.post('/api/trip/delays', async (req, res) => {
+    // MODIFIED: Get tripId from request body instead of URL params
+    const { tripId } = req.body;
+
+    if (!tripId) {
+        return res.status(400).json({ error: 'tripId is required in the request body.' });
+    }
+
+    try {
+        const query = `
+            SELECT
+                se.stop_id,
+                s.stop_name,
+                se.stop_sequence,
+                se.planned_time,
+                se.actual_time,
+                se.arrival_delay_seconds,
+                se.departure_delay_seconds
+            FROM stop_events se
+            JOIN stops s ON se.stop_id = s.stop_id
+            WHERE se.trip_id = $1
+            AND se.event_type = 'arrival'
+            ORDER BY se.stop_sequence;
+        `;
+        const { rows } = await pool.query(query, [tripId]);
+        res.json(rows);
+    } catch (err)
+    {
+        console.error(`Error fetching delay stats for trip ${tripId}:`, err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
 
+// (The rest of your WebSocket and server startup code remains the same)
 // --- WEBSOCKET SETUP ---
 const wss = new WebSocketServer({ server });
 const LIVE_UPDATE_INTERVAL = 5 * 1000; // 5 seconds
 
-// Function to fetch the latest vehicle positions and format as GeoJSON
 async function getLiveVehicleData() {
-    // This query gets the single most recent position for each trip ID
     const query = `
         SELECT DISTINCT ON (vp.trip_id)
             vp.trip_id,
@@ -102,7 +122,6 @@ async function getLiveVehicleData() {
     `;
     const { rows } = await pool.query(query);
 
-    // Format the database rows into a GeoJSON FeatureCollection
     const geoJson = {
         type: 'FeatureCollection',
         features: rows.map(row => ({
@@ -120,7 +139,6 @@ async function getLiveVehicleData() {
     return JSON.stringify(geoJson);
 }
 
-// Function to broadcast data to all connected clients
 function broadcast(data) {
     wss.clients.forEach(client => {
         if (client.readyState === 1) { // WebSocket.OPEN
@@ -129,7 +147,6 @@ function broadcast(data) {
     });
 }
 
-// Set up the broadcast loop
 setInterval(async () => {
     if (wss.clients.size > 0) {
         try {
@@ -146,8 +163,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => console.log('Client disconnected'));
 });
 
-
-// --- STARTUP ---
 server.listen(PORT, () => {
     console.log(`API Server is listening on http://localhost:${PORT}`);
 });
+

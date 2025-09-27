@@ -1,0 +1,19 @@
+{
+  "liveMap": "Live Map",
+  "statistics": "Statistics",
+  "linePerformanceStats": "Line Performance Statistics",
+  "selectLine": "Select a Line",
+  "pleaseChoose": "Please choose a line",
+  "date": "Date",
+  "getTrips": "Get Trips",
+  "loading": "Loading...",
+  "tripsFor": "Trips for {lineName} on {date}",
+  "direction": "Direction",
+  "noTripsFound": "No trips found for the selected criteria.",
+  "loadingTripDetails": "Loading Trip Details",
+  "delayDetailsForTrip": "Delay Details for Trip {tripId}",
+  "stopName": "Stop Name",
+  "plannedArrival": "Planned",
+  "actualArrival": "Actual",
+  "delay": "Delay"
+}

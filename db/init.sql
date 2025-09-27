@@ -7,43 +7,50 @@ CREATE TYPE event_type AS ENUM ('arrival', 'departure');
 
 -- Create tables for static data
 CREATE TABLE IF NOT EXISTS stops (
-                                     stop_id VARCHAR(255) PRIMARY KEY,
-    stop_name VARCHAR(255),
-    location GEOGRAPHY(Point, 4326)
+    -- MODIFIED: Use TEXT instead of VARCHAR to follow best practices
+                                     stop_id TEXT PRIMARY KEY,
+                                     stop_name TEXT,
+                                     location GEOGRAPHY(Point, 4326)
     );
 
 CREATE TABLE IF NOT EXISTS lines (
-                                     line_id VARCHAR(255) PRIMARY KEY,
-    line_name VARCHAR(255),
-    product VARCHAR(50)
-    );
+    -- MODIFIED: Use TEXT instead of VARCHAR
+                                     line_id TEXT PRIMARY KEY,
+                                     line_name TEXT,
+                                     product TEXT
+);
 
 CREATE TABLE IF NOT EXISTS trips (
-                                     trip_id VARCHAR(255) PRIMARY KEY,
-    line_id VARCHAR(255) REFERENCES lines(line_id),
-    direction VARCHAR(255),
+    -- MODIFIED: Use TEXT instead of VARCHAR
+                                     trip_id TEXT PRIMARY KEY,
+                                     line_id TEXT REFERENCES lines(line_id),
+    direction TEXT,
     date DATE
     );
 
 -- Create the hypertable for stop events
 CREATE TABLE IF NOT EXISTS stop_events (
-                                           trip_id VARCHAR(255) REFERENCES trips(trip_id),
-    stop_id VARCHAR(255) REFERENCES stops(stop_id),
-    "timestamp" TIMESTAMPTZ NOT NULL,
+                                           "timestamp" TIMESTAMPTZ NOT NULL,
+    -- MODIFIED: Use TEXT instead of VARCHAR
+                                           trip_id TEXT REFERENCES trips(trip_id),
+    stop_id TEXT REFERENCES stops(stop_id),
+    stop_sequence INTEGER,
     event_type event_type NOT NULL,
-    time_planned TIMESTAMPTZ,
-    time_actual TIMESTAMPTZ,
-    delay_seconds INTEGER,
-    PRIMARY KEY (trip_id, stop_id, "timestamp")
+    planned_time TIMESTAMPTZ,
+    actual_time TIMESTAMPTZ,
+    arrival_delay_seconds INTEGER,
+    departure_delay_seconds INTEGER,
+    -- MODIFIED: Changed the primary key to be compatible with TimescaleDB hypertable requirements
+    PRIMARY KEY ("timestamp", trip_id, stop_id, event_type)
     );
 
 -- Create the hypertable for real-time vehicle positions
 CREATE TABLE IF NOT EXISTS vehicle_positions (
-                                                 trip_id VARCHAR(255) REFERENCES trips(trip_id),
+    -- MODIFIED: Use TEXT instead of VARCHAR
+                                                 trip_id TEXT REFERENCES trips(trip_id),
     "timestamp" TIMESTAMPTZ NOT NULL,
     location GEOGRAPHY(Point, 4326),
     delay_seconds INTEGER,
-    speed_mps REAL,
     PRIMARY KEY (trip_id, "timestamp")
     );
 
