@@ -128,7 +128,7 @@ function updateMarkers(geoJsonData) {
 
 function connectWebSocket() {
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  socket = new WebSocket(`${wsProtocol}//${window.location.hostname}:3001`);
+  socket = new WebSocket(`${wsProtocol}//${window.location.host}`);
 
   socket.onopen = () => console.log("WebSocket connection established");
   socket.onclose = () => {
