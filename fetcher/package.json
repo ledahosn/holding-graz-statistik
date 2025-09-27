@@ -1,0 +1,14 @@
+{
+  "name": "graz-transport-fetcher",
+  "version": "1.0.0",
+  "description": "Data fetching service for the Graz public transport monitoring system.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "hafas-client": "^6.3.5",
+    "pg": "^8.16.3"
+  }
+}

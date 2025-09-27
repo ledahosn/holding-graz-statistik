@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  # The database service using TimescaleDB with PostGIS
+  db:
+    image: timescale/timescaledb-ha:pg16-all
+    container_name: graz_transport_db
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=graz_transport
+    volumes:
+      - ./db:/docker-entrypoint-initdb.d
+      - graz_db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d graz_transport"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - transport_network
+
+  # The data fetching service
+  fetcher:
+    build:
+      context: ./fetcher
+    container_name: graz_transport_fetcher
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://user:password@db:5432/graz_transport
+    volumes:
+      # Mount the local source code into the container
+      - ./fetcher:/usr/src/app
+      # This tells Docker: DO NOT overwrite the node_modules folder with a local one.
+      # Use the one that was built inside the image.
+      - /usr/src/app/node_modules
+    networks:
+      - transport_network
+
+
+  # The backend API service
+  api:
+    build:
+      context: ./api
+    container_name: graz_transport_api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://user:password@db:5432/graz_transport
+    ports:
+      - "3001:3001"
+    volumes:
+      # Mount source code for live-reloading
+      - ./api:/usr/src/app
+      # Preserve the container's node_modules directory
+      - /usr/src/app/node_modules
+    networks:
+      - transport_network
+
+  # The frontend web service
+  web:
+    build:
+      context: ./web
+      # Tell Docker Compose to use the 'build' stage from our Dockerfile for this service
+      target: build
+    container_name: graz_transport_web
+    ports:
+      # Expose Nginx port 80 (for production)
+      - "80:80"
+      # Expose Vite dev server port 5173 (for development)
+      - "5173:5173"
+    depends_on:
+      - api
+    volumes:
+      # Mount source for live-reloading with Vite
+      - ./web:/usr/src/app
+      - /usr/src/app/node_modules
+    networks:
+      - transport_network
+    # This command now runs inside the Node.js 'build' container, where 'npm' exists
+    command: npm run dev
+
+  # Add this new service for Adminer
+  adminer:
+    image: adminer
+    container_name: graz_transport_adminer
+    ports:
+      - "8080:8080"
+    networks:
+      - transport_network
+    depends_on:
+      db:
+        condition: service_healthy
+
+
+
+networks:
+  transport_network:
+    driver: bridge
+
+volumes:
+  graz_db_data:
+    driver: local
