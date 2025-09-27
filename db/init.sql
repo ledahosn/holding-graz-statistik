@@ -7,21 +7,18 @@ CREATE TYPE event_type AS ENUM ('arrival', 'departure');
 
 -- Create tables for static data
 CREATE TABLE IF NOT EXISTS stops (
-    -- MODIFIED: Use TEXT instead of VARCHAR to follow best practices
                                      stop_id TEXT PRIMARY KEY,
                                      stop_name TEXT,
                                      location GEOGRAPHY(Point, 4326)
     );
 
 CREATE TABLE IF NOT EXISTS lines (
-    -- MODIFIED: Use TEXT instead of VARCHAR
                                      line_id TEXT PRIMARY KEY,
                                      line_name TEXT,
                                      product TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trips (
-    -- MODIFIED: Use TEXT instead of VARCHAR
                                      trip_id TEXT PRIMARY KEY,
                                      line_id TEXT REFERENCES lines(line_id),
     direction TEXT,
@@ -31,7 +28,6 @@ CREATE TABLE IF NOT EXISTS trips (
 -- Create the hypertable for stop events
 CREATE TABLE IF NOT EXISTS stop_events (
                                            "timestamp" TIMESTAMPTZ NOT NULL,
-    -- MODIFIED: Use TEXT instead of VARCHAR
                                            trip_id TEXT REFERENCES trips(trip_id),
     stop_id TEXT REFERENCES stops(stop_id),
     stop_sequence INTEGER,
@@ -40,13 +36,11 @@ CREATE TABLE IF NOT EXISTS stop_events (
     actual_time TIMESTAMPTZ,
     arrival_delay_seconds INTEGER,
     departure_delay_seconds INTEGER,
-    -- MODIFIED: Changed the primary key to be compatible with TimescaleDB hypertable requirements
     PRIMARY KEY ("timestamp", trip_id, stop_id, event_type)
     );
 
 -- Create the hypertable for real-time vehicle positions
 CREATE TABLE IF NOT EXISTS vehicle_positions (
-    -- MODIFIED: Use TEXT instead of VARCHAR
                                                  trip_id TEXT REFERENCES trips(trip_id),
     "timestamp" TIMESTAMPTZ NOT NULL,
     location GEOGRAPHY(Point, 4326),
@@ -61,3 +55,9 @@ SELECT create_hypertable('vehicle_positions', 'timestamp', if_not_exists => TRUE
 -- Create spatial indexes for fast geospatial queries
 CREATE INDEX IF NOT EXISTS vehicle_positions_location_idx ON vehicle_positions USING GIST (location);
 CREATE INDEX IF NOT EXISTS stops_location_idx ON stops USING GIST (location);
+
+-- Create indexes for foreign keys and common query patterns
+CREATE INDEX IF NOT EXISTS trips_line_id_date_idx ON trips (line_id, date);
+CREATE INDEX IF NOT EXISTS stop_events_trip_id_idx ON stop_events (trip_id);
+CREATE INDEX IF NOT EXISTS stop_events_stop_id_idx ON stop_events (stop_id);
+CREATE INDEX IF NOT EXISTS vehicle_positions_trip_id_timestamp_desc_idx ON vehicle_positions (trip_id, "timestamp" DESC);

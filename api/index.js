@@ -22,7 +22,6 @@ const corsOptions = {
     origin: 'http://localhost:5173'
 };
 app.use(cors(corsOptions));
-// Add JSON body parser middleware for POST requests
 app.use(express.json());
 
 
@@ -65,9 +64,8 @@ app.get('/api/trips/line/:lineId', async (req, res) => {
     }
 });
 
-// MODIFIED: Changed from GET to POST to handle complex trip_id
+// MODIFIED: Changed from GET to POST and uses a JOIN for efficiency
 app.post('/api/trip/delays', async (req, res) => {
-    // MODIFIED: Get tripId from request body instead of URL params
     const { tripId } = req.body;
 
     if (!tripId) {
@@ -85,9 +83,9 @@ app.post('/api/trip/delays', async (req, res) => {
                 se.arrival_delay_seconds,
                 se.departure_delay_seconds
             FROM stop_events se
-            JOIN stops s ON se.stop_id = s.stop_id
+                     JOIN stops s ON se.stop_id = s.stop_id
             WHERE se.trip_id = $1
-            AND se.event_type = 'arrival'
+              AND se.event_type = 'arrival'
             ORDER BY se.stop_sequence;
         `;
         const { rows } = await pool.query(query, [tripId]);
@@ -100,7 +98,6 @@ app.post('/api/trip/delays', async (req, res) => {
 });
 
 
-// (The rest of your WebSocket and server startup code remains the same)
 // --- WEBSOCKET SETUP ---
 const wss = new WebSocketServer({ server });
 const LIVE_UPDATE_INTERVAL = 5 * 1000; // 5 seconds
@@ -166,4 +163,3 @@ wss.on('connection', (ws) => {
 server.listen(PORT, () => {
     console.log(`API Server is listening on http://localhost:${PORT}`);
 });
-
