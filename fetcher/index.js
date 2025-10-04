@@ -3,12 +3,10 @@ import { profile as stvProfile } from 'hafas-client/p/stv/index.js';
 import pkg from 'pg';
 const { Pool } = pkg;
 
-console.log('Fetcher service starting...');
-
 // --- CONFIGURATION ---
 const DEBUG = true;
-const FETCH_INTERVAL = 45 * 1000; // 45 seconds
-const STATIONS_PER_CYCLE = 5; // How many new stations to query each cycle
+const FETCH_INTERVAL = 45 * 1000;
+const STATIONS_PER_CYCLE = 5;
 const JAKOMINIPLATZ_ID = '460304700';
 const ONLY_FETCH_GRAZ_LINES = true;
 
@@ -20,11 +18,50 @@ const GRAZ_BOUNDING_BOX = {
 };
 
 // --- STATE ---
-// Set of all stop IDs that have been discovered
 const discoveredStops = new Set([JAKOMINIPLATZ_ID]);
-// Array of stop IDs that we should query for departures
 const stopsToQuery = [JAKOMINIPLATZ_ID];
 
+// --- LOGGER & UTILS ---
+const COLORS = {
+    RESET: "\x1b[0m",
+    RED: "\x1b[31m",
+    GREEN: "\x1b[32m",
+    YELLOW: "\x1b[33m",
+    BLUE: "\x1b[34m",
+    MAGENTA: "\x1b[35m",
+};
+
+const LOG_LEVELS = {
+    ERROR: { color: COLORS.RED, name: 'ERROR' },
+    WARN: { color: COLORS.YELLOW, name: 'WARN' },
+    INFO: { color: COLORS.GREEN, name: 'INFO' },
+    DEBUG: { color: COLORS.BLUE, name: 'DEBUG' },
+};
+
+function log(level, context, message) {
+    if (level === 'DEBUG' && !DEBUG) {
+        return;
+    }
+    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const levelInfo = LOG_LEVELS[level] || { color: COLORS.RESET, name: level };
+    console.log(`${levelInfo.color}[${timestamp}] [${levelInfo.name.padEnd(5)}] ${context.padEnd(12)} :: ${message}${COLORS.RESET}`);
+}
+
+function parseTripId(tripId) {
+    const getVal = (key) => {
+        const match = tripId.match(new RegExp(`#${key}#([^#]+)`));
+        return match ? match[1] : '?';
+    };
+    return {
+        line: getVal('ZE'),
+        fromId: getVal('FR'),
+        fromTime: getVal('FT'),
+        toId: getVal('TO'),
+        toTime: getVal('TT'),
+    };
+}
+
+log('INFO', '[INIT]', 'Fetcher service starting...');
 
 // --- DATABASE SETUP ---
 const pool = new Pool({
@@ -35,7 +72,8 @@ const dbQuery = async (query, values) => {
     try {
         return await pool.query(query, values);
     } catch (err) {
-        console.error(`Database Error on query: ${query.substring(0, 100)}...`, err.message);
+        log('ERROR', '[DB]', `Query failed: ${err.message}`);
+        log('DEBUG', '[DB]', `Failing Query: ${query.substring(0, 150).replace(/\s\s+/g, ' ')}...`);
     }
 };
 
@@ -47,9 +85,10 @@ const hafas = createClient(stvProfile, userAgent);
 function isGrazLine(line) {
     if (!ONLY_FETCH_GRAZ_LINES) return true;
     if (!line || !line.name || !line.product) return false;
-    const lineIdentifier = line.name.split(' ').pop();
-    const isTram = line.product === 'tram' && /^\d{1,2}$/.test(lineIdentifier);
-    const isBus = line.product === 'city-bus' && /^\d{2}E?A?$/.test(lineIdentifier);
+    const lineIdentifier = line.name.match(/\d{1,2}[A-Z]?/);
+    if (!lineIdentifier) return false;
+    const isTram = line.product === 'tram';
+    const isBus = line.product === 'city-bus';
     return isTram || isBus;
 }
 
@@ -64,91 +103,98 @@ function isWithinBoundingBox(location) {
 }
 
 // --- CORE LOGIC ---
-
 async function upsertStopEvent(event) {
     const { trip_id, stop_id, event_type, stop_sequence, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds } = event;
     const now = new Date();
     const eventTime = actual_time ? new Date(actual_time) : (planned_time ? new Date(planned_time) : now);
 
-    const selectQuery = `
-        SELECT actual_time FROM stop_events
-        WHERE trip_id = $1 AND stop_id = $2 AND event_type = $3;
-    `;
-    const result = await dbQuery(selectQuery, [trip_id, stop_id, event_type]);
-    const existingEvent = result && result.rows.length > 0 ? result.rows[0] : null;
-
-    if (existingEvent) {
-        const existingEventTime = existingEvent.actual_time ? new Date(existingEvent.actual_time) : null;
-        if (existingEventTime && existingEventTime < now) {
-            if (DEBUG) console.log(`  -> [DB] Skipping update for past event: Trip ${trip_id}, Stop ${stop_id}, Type ${event_type}`);
-            return;
-        }
-        const updateQuery = `
-            UPDATE stop_events SET "timestamp" = $1, actual_time = $2, arrival_delay_seconds = $3, departure_delay_seconds = $4, planned_time = $5, stop_sequence = $6
-            WHERE trip_id = $7 AND stop_id = $8 AND event_type = $9;
-        `;
-        await dbQuery(updateQuery, [eventTime, actual_time, arrival_delay_seconds, departure_delay_seconds, planned_time, stop_sequence, trip_id, stop_id, event_type]);
-    } else {
-        const insertQuery = `
-            INSERT INTO stop_events (timestamp, trip_id, stop_id, stop_sequence, event_type, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
-        `;
-        await dbQuery(insertQuery, [eventTime, trip_id, stop_id, stop_sequence, event_type, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds]);
+    if (Math.abs(now - eventTime) > 24 * 60 * 60 * 1000) {
+        const parsedId = parseTripId(trip_id);
+        log('DEBUG', `[DB:SKIP]`, `Skipping out-of-range event for Trip on Line ${parsedId.line}`);
+        return;
     }
+
+    const query = `
+        INSERT INTO stop_events (timestamp, trip_id, stop_id, stop_sequence, event_type, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT ("timestamp", trip_id, stop_id, event_type) DO UPDATE SET
+            planned_time = EXCLUDED.planned_time,
+                                                                           actual_time = EXCLUDED.actual_time,
+                                                                           arrival_delay_seconds = EXCLUDED.arrival_delay_seconds,
+                                                                           departure_delay_seconds = EXCLUDED.departure_delay_seconds;
+    `;
+    await dbQuery(query, [eventTime, trip_id, stop_id, stop_sequence, event_type, planned_time, actual_time, arrival_delay_seconds, departure_delay_seconds]);
 }
 
 async function fetchTripDetails(tripId) {
-    try {
-        if (DEBUG) console.log(`[TRIP] Fetching details for tripId: ${tripId}`);
-        const { trip } = await hafas.trip(tripId, { stopovers: true });
-        if (!trip || !trip.line || !isGrazLine(trip.line)) return;
+    const parsedId = parseTripId(tripId);
+    const tripContext = `Line ${parsedId.line} (${parsedId.fromTime} -> ${parsedId.toTime})`;
 
-        await dbQuery('INSERT INTO lines (line_id, line_name, product) VALUES ($1, $2, $3) ON CONFLICT (line_id) DO NOTHING', [trip.line.id, trip.line.name, trip.line.product]);
-        const date = new Date(trip.departure || trip.plannedDeparture).toISOString().split('T')[0];
-        await dbQuery('INSERT INTO trips (trip_id, line_id, direction, date) VALUES ($1, $2, $3, $4) ON CONFLICT (trip_id) DO NOTHING', [trip.id, trip.line.id, trip.direction, date]);
+    try {
+        log('DEBUG', '[HAFAS:GET]', `Fetching details for trip: ${tripContext}`);
+        const { trip } = await hafas.trip(tripId, { stopovers: true, remarks: false });
+
+        if (!trip || !trip.line || !isGrazLine(trip.line)) {
+            log('DEBUG', '[HAFAS:SKIP]', `Skipped non-Graz trip: ${tripContext}`);
+            return;
+        }
+
+        log('DEBUG', '[HAFAS:PROC]', `Processing Line ${trip.line.name} -> ${trip.direction || 'N/A'}`);
+
+        const lineMatch = trip.line.name.match(/\d{1,2}[A-Z]?/);
+        const lineNumber = lineMatch ? lineMatch[0] : null;
+        await dbQuery('INSERT INTO lines (line_id, line_name, product, line_number) VALUES ($1, $2, $3, $4) ON CONFLICT (line_id) DO UPDATE SET line_name = EXCLUDED.line_name, product = EXCLUDED.product, line_number = EXCLUDED.line_number', [trip.line.id, trip.line.name, trip.line.product, lineNumber]);
+
+        const date = new Date(trip.plannedDeparture || new Date()).toISOString().split('T')[0];
+        const firstDeparture = trip.stopovers.find(so => so.plannedDeparture)?.plannedDeparture;
+        const departureTime = firstDeparture ? new Date(firstDeparture).toTimeString().split(' ')[0] : null;
+        await dbQuery('INSERT INTO trips (trip_id, line_id, direction, date, departure_time) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (trip_id) DO UPDATE SET direction = EXCLUDED.direction, date = EXCLUDED.date, departure_time = EXCLUDED.departure_time', [trip.id, trip.line.id, trip.direction, date, departureTime]);
 
         if (trip.currentLocation) {
-            await dbQuery('INSERT INTO vehicle_positions (trip_id, "timestamp", location, delay_seconds) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326), $5) ON CONFLICT (trip_id, "timestamp") DO NOTHING', [trip.id, new Date().toISOString(), trip.currentLocation.longitude, trip.currentLocation.latitude, trip.departureDelay || 0]);
+            const delay = trip.departureDelay !== null ? trip.departureDelay : (trip.arrivalDelay !== null ? trip.arrivalDelay : 0);
+            await dbQuery('INSERT INTO vehicle_positions (trip_id, "timestamp", location, delay_seconds) VALUES ($1, NOW(), ST_SetSRID(ST_MakePoint($2, $3), 4326), $4)', [trip.id, trip.currentLocation.longitude, trip.currentLocation.latitude, delay]);
         }
 
         for (const [index, stopover] of trip.stopovers.entries()) {
             const { stop } = stopover;
-            if (!stop || !stop.id) continue;
+            if (!stop || !stop.id || !stop.location) continue;
 
-            // --- Network Discovery ---
-            // If we find a stop we haven't seen before, add it to our lists for future queries.
+            await dbQuery('INSERT INTO stops (stop_id, stop_name, location) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326)) ON CONFLICT (stop_id) DO NOTHING', [stop.id, stop.name, stop.location.longitude, stop.location.latitude]);
+
             if (!discoveredStops.has(stop.id)) {
-                if(isWithinBoundingBox(stop.location)) {
-                    discoveredStops.add(stop.id);
+                discoveredStops.add(stop.id);
+                if (isWithinBoundingBox(stop.location)) {
                     stopsToQuery.push(stop.id);
-                    if (DEBUG) console.log(`  -> [DISCOVERY] Found new stop: ${stop.name} (${stop.id})`);
-                    await dbQuery('INSERT INTO stops (stop_id, stop_name, location) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326)) ON CONFLICT (stop_id) DO NOTHING', [stop.id, stop.name, stop.location.longitude, stop.location.latitude]);
+                    log('DEBUG', '[DISCOVERY]', `New stop for queue: ${stop.name} (${stop.id})`);
+                } else {
+                    log('DEBUG', '[DISCOVERY]', `Out-of-bounds stop found: ${stop.name}`);
                 }
             }
 
-            if(stopover.arrival || stopover.plannedArrival) await upsertStopEvent({ trip_id: trip.id, stop_id: stop.id, stop_sequence: index + 1, event_type: 'arrival', planned_time: stopover.plannedArrival, actual_time: stopover.arrival, arrival_delay_seconds: stopover.arrivalDelay, departure_delay_seconds: null });
-            if(stopover.departure || stopover.plannedDeparture) await upsertStopEvent({ trip_id: trip.id, stop_id: stop.id, stop_sequence: index + 1, event_type: 'departure', planned_time: stopover.plannedDeparture, actual_time: stopover.departure, arrival_delay_seconds: null, departure_delay_seconds: stopover.departureDelay });
+            if (stopover.arrival || stopover.plannedArrival) await upsertStopEvent({ trip_id: trip.id, stop_id: stop.id, stop_sequence: index + 1, event_type: 'arrival', planned_time: stopover.plannedArrival, actual_time: stopover.arrival, arrival_delay_seconds: stopover.arrivalDelay, departure_delay_seconds: null });
+            if (stopover.departure || stopover.plannedDeparture) await upsertStopEvent({ trip_id: trip.id, stop_id: stop.id, stop_sequence: index + 1, event_type: 'departure', planned_time: stopover.plannedDeparture, actual_time: stopover.departure, arrival_delay_seconds: null, departure_delay_seconds: stopover.departureDelay });
         }
     } catch (error) {
-        console.error(`Error fetching trip ${tripId}:`, error.message);
+        log('ERROR', `[TRIP]`, `Fetch failed for ${tripContext}: ${error.message}`);
     }
 }
 
 async function mainLoop() {
-    console.log('\n--- Starting new fetch cycle ---');
+    log('INFO', '[MAIN]', '--- Starting new fetch cycle ---');
     const processedTripIds = new Set();
 
-    // Take the first N stops from our queue. If the queue is empty, reset with Jakominiplatz.
     if (stopsToQuery.length === 0) {
-        console.log('[WARNING] Stop query queue was empty. Resetting with Jakominiplatz.');
+        log('WARN', '[MAIN]', 'Stop query queue empty. Resetting with Jakominiplatz.');
         stopsToQuery.push(JAKOMINIPLATZ_ID);
     }
-    const currentStops = stopsToQuery.splice(0, STATIONS_PER_CYCLE);
 
-    console.log(`Querying departures for ${currentStops.length} stops. Total discovered: ${discoveredStops.size}`);
+    stopsToQuery.sort(() => 0.5 - Math.random());
+    const currentStops = stopsToQuery.slice(0, STATIONS_PER_CYCLE);
+
+    log('INFO', '[MAIN]', `Querying ${currentStops.length} stops. Discovered: ${discoveredStops.size}. Queue: ${stopsToQuery.length}`);
 
     try {
-        const departurePromises = currentStops.map(stopId => hafas.departures(stopId, { duration: 90 }));
+        const departurePromises = currentStops.map(stopId => hafas.departures(stopId, { duration: 120 }));
         const results = await Promise.allSettled(departurePromises);
 
         for (const result of results) {
@@ -161,26 +207,26 @@ async function mainLoop() {
             }
         }
 
-        console.log(`Found ${processedTripIds.size} unique trips to process in this cycle.`);
-        for (const tripId of processedTripIds) {
-            await fetchTripDetails(tripId);
-        }
+        log('INFO', '[MAIN]', `Found ${processedTripIds.size} unique trips to process.`);
+
+        const tripDetailPromises = Array.from(processedTripIds).map(tripId => fetchTripDetails(tripId));
+        await Promise.all(tripDetailPromises);
 
     } catch (error) {
-        console.error('Error in main fetch loop:', error.message);
+        log('ERROR', '[MAIN]', `Error in main fetch loop: ${error.message}`);
     }
-    console.log('--- Fetch cycle complete. Waiting for next interval. ---');
+    log('INFO', '[MAIN]', '--- Fetch cycle complete. Waiting for next interval. ---');
 }
 
 // --- STARTUP ---
 pool.connect()
     .then(async (client) => {
-        console.log('Successfully connected to the database.');
+        log('INFO', '[DB]', 'Successfully connected to the database.');
         client.release();
-        mainLoop(); // Run once immediately
+        mainLoop();
         setInterval(mainLoop, FETCH_INTERVAL);
     })
     .catch(err => {
-        console.error('Failed to connect to the database:', err.message);
+        log('ERROR', '[DB]', `Failed to connect to the database: ${err.message}`);
         process.exit(1);
     });

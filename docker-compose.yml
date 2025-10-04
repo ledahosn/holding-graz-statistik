@@ -1,4 +1,4 @@
-# docker-compose.yml
+# docker-compose.yml (for Production)
 services:
   db:
     image: timescale/timescaledb-ha:pg16-all
@@ -23,6 +23,7 @@ services:
   fetcher:
     build:
       context: ./fetcher
+      target: production # Explicitly build the 'production' stage
     container_name: graz_transport_fetcher
     depends_on:
       db:
@@ -35,21 +36,24 @@ services:
   api:
     build:
       context: ./api
+      target: production # Explicitly build the 'production' stage
     container_name: graz_transport_api
     depends_on:
       db:
         condition: service_healthy
     environment:
       - DATABASE_URL=${DATABASE_URL}
-    ports:
-      - "3001:3001"
+    # Port 3001 is not exposed here directly; nginx will proxy to it.
     networks:
       - transport_network
 
   web:
     build:
       context: ./web
+      target: production # Build the final nginx stage
     container_name: graz_transport_web
+    ports:
+      - "80:80" # Expose the nginx server port
     depends_on:
       - api
     networks:

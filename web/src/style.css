@@ -2,39 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Leaflet requires the map container to have a defined height */
-#map {
+.map-container {
     height: calc(100vh - 4rem); /* Full viewport height minus navbar height */
 }
 
-/* --- Custom Vehicle Marker Styles --- */
-.vehicle-marker {
-    @apply relative flex flex-col items-center transition-transform duration-300 ease-in-out;
-}
-
-.main-icon {
-    @apply w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shadow-lg border-2 border-white relative overflow-hidden;
-}
-
-.line-badge {
-    @apply absolute -top-1 -right-1 bg-white bg-opacity-90 text-black text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center border border-gray-300;
-}
-
-.delay-label {
-    @apply absolute -bottom-4 text-xs font-bold text-white px-1.5 py-0.5 rounded-full shadow-md whitespace-nowrap;
-}
-
-
 /* --- Custom Popup Styles --- */
 .leaflet-popup-content-wrapper {
-    @apply !bg-transparent !shadow-none !border-none;
+    @apply rounded-lg shadow-lg border-none;
 }
 .leaflet-popup-content {
     @apply !m-0;
 }
 .leaflet-popup-tip-container {
-    @apply !hidden; /* Hide the default tip */
+    @apply hidden; /* Hide the default tip */
 }
 .leaflet-container a.leaflet-popup-close-button {
-    @apply !top-2 !right-2 !w-8 !h-8 !flex !items-center !justify-center !bg-white !bg-opacity-20 !text-white !rounded-full transition-colors hover:!bg-opacity-30;
+    @apply !top-2 !right-2 !w-8 !h-8 !flex !items-center !justify-center !bg-black/10 !text-white !rounded-full transition-colors hover:!bg-black/20;
 }

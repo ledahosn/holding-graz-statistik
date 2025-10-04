@@ -1,7 +1,7 @@
 <template>
-  <Map />
+  <MapComponent />
 </template>
 
 <script setup>
-import Map from '../components/Map.vue';
+import MapComponent from '../components/MapComponent.vue';
 </script>

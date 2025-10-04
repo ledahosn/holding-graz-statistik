@@ -1,20 +1,31 @@
+# docker-compose.dev.yml (for Development)
 services:
   fetcher:
+    build:
+      context: ./fetcher
+      target: development # Use the 'development' stage from Dockerfile
+    command: node --watch index.js # Use node's native watcher
     volumes:
       - ./fetcher:/usr/src/app
       - /usr/src/app/node_modules
 
   api:
+    build:
+      context: ./api
+      target: development # Use the 'development' stage from Dockerfile
+    command: node --watch index.js # Use node's native watcher
+    ports:
+      - "3001:3001" # Expose API directly for dev
     volumes:
       - ./api:/usr/src/app
       - /usr/src/app/node_modules
 
   web:
     build:
-      target: build # Use the build stage for the dev server
+      context: ./web
+      target: development # Use the 'development' stage from Dockerfile
     ports:
-      - "80:80"
-      - "5173:5173"
+      - "5173:5173" # Expose the Vite dev server
     volumes:
       - ./web:/usr/src/app
       - /usr/src/app/node_modules
